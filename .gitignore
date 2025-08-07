@@ -1,0 +1,5 @@
+# Ignore virtual environment folder
+venv/
+
+# Ignore dlib's facial landmark model file
+shape_predictor_68_face_landmarks.dat
