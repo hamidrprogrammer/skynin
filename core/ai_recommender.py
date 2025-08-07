@@ -16,6 +16,33 @@ genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 import pyodbc
 
+# ---------------------------------------------------------------------------
+# Helper utilities
+# ---------------------------------------------------------------------------
+
+# Map numeric scores (0-100) to qualitative severities so downstream prompts
+# have explicit meaning for each value. This helps the language model reason
+# about the user's skin state without guessing what a number represents.
+def _severity(score: float) -> str:
+    if score is None:
+        return "unknown"
+    if score < 33:
+        return "low"
+    if score < 66:
+        return "moderate"
+    return "high"
+
+# Human‑readable labels for metrics returned from the analyzer
+METRIC_LABELS = {
+    "wrinkle_score": "Wrinkle Index",
+    "oiliness_score": "Oiliness Index",
+    "redness_score": "Redness/Irritation Index",
+    "dryness_score": "Dryness Texture Index",
+    "dark_spot_score": "Dark Spot Index",
+    "pore_score": "Pore Visibility Index",
+    "acne_score": "Acne/Blemish Index",
+}
+
 def get_connection():
     conn = pyodbc.connect(
         "Driver={SQL Server};"
@@ -100,7 +127,6 @@ def generate_ai_recommendation(skin_metrics: dict, product_list: list) -> dict:
     print("product_images_data keys:", list(product_images_data.keys()))
     product_info_map = {str(p['id']): p for p in product_list}
 
-
     # اگر product_info_map وجود دارد، اطلاعات نام و توضیح را اضافه کن
     if product_info_map:
         for pid, images in product_images_data.items():
@@ -110,20 +136,32 @@ def generate_ai_recommendation(skin_metrics: dict, product_list: list) -> dict:
                     image['english_name'] = info.get('english_name')
                     image['english_description'] = info.get('english_description')
 
+    # --- Build metric section with qualitative interpretation ---
+    metric_lines = []
+    for key, label in METRIC_LABELS.items():
+        value = skin_metrics.get(key)
+        if value is not None:
+            metric_lines.append(f"- **{label}:** {value} ({_severity(value)})")
+    tone_desc = skin_metrics.get('skin_tone_description')
+    if tone_desc:
+        metric_lines.append(f"- **Analyzed Skin Tone:** {tone_desc}")
+    metrics_block = "\n".join(metric_lines)
+
     # --- **پرامپت مهندسی‌شده برای تحلیل داده (Data-Driven Prompt)** ---
     prompt = f"""
     **Your Role:** You are a highly-respected data scientist specializing in dermatology. Your analysis is based purely on quantitative data. You must be objective, precise, and justify every conclusion with the provided metrics.
 
-    **User's Quantitative Skin Profile (Scale 0-100):**
-    - **Wrinkle Index:** {skin_metrics['wrinkle_score']}
-    - **Oiliness Index:** {skin_metrics['oiliness_score']}
-    - **Redness/Irritation Index:** {skin_metrics['redness_score']}
-    - **Analyzed Skin Tone:** {skin_metrics['skin_tone_description']}
+    **Metric Interpretation Guide (0-100):**
+    - 0-32 → low concern
+    - 33-65 → moderate concern
+    - 66-100 → high concern
+
+    **User's Quantitative Skin Profile:**
+    {metrics_block}
 
     **Candidate Products (Identified by semantic search):**
     ---
     """
-   
 
     for i, product in enumerate(product_list, 1):
         prompt += f"""
@@ -134,10 +172,10 @@ def generate_ai_recommendation(skin_metrics: dict, product_list: list) -> dict:
 
     prompt += """
     **Your Mission:**
-    1.  **Analyze the Data:** Briefly interpret the user's quantitative metrics. For example, a high Wrinkle Index suggests a need for anti-aging ingredients like retinol. A high Redness Index points to sensitivity. A low Oiliness Index indicates dryness.
-    2.  **Select the Optimal Product:** Based on your data analysis, choose the SINGLE most suitable product from the list. Your choice must be directly justified by the metrics.
-    3.  **Provide a Justification:** In a section called "Analytical Justification", explain *why* you chose that product by explicitly referencing the user's scores and the product's description. For example: "The user's Redness Index is high ({skin_metrics['redness_score']}), and Product X contains Centella Asiatica, an ingredient known for calming irritation."
-    4.  **Format the Output:** Present the final recommendation in clear, professional English. Use Markdown for structure. The tone should be that of an expert providing a clinical-grade consultation.
+    1. **Analyze the Data:** Interpret the user's metrics using the guide above. Avoid making assumptions beyond the numbers.
+    2. **Select the Optimal Product:** Choose the SINGLE best product and justify the choice directly with the metrics.
+    3. **Provide a Justification:** In a section called "Analytical Justification", explicitly reference the user's scores and product descriptions.
+    4. **Format the Output:** Present the final recommendation in clear, professional English with Markdown formatting.
     """
 
     print("\n🔬 Sending data-driven prompt to Gemini...")
@@ -145,9 +183,9 @@ def generate_ai_recommendation(skin_metrics: dict, product_list: list) -> dict:
     try:
         response = model.generate_content(prompt)
         return {
-    "text": response.text,
-    "images": product_images_data
-}
+            "text": response.text,
+            "images": product_images_data,
+        }
     except Exception as e:
         return f"An error occurred while communicating with the AI model: {e}"
 
